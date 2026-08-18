@@ -6,7 +6,8 @@ import random
 import re
 import time
 from collections import deque
-from typing import List
+from dataclasses import dataclass
+from typing import Any, List
 
 import tiktoken
 from dotenv import load_dotenv
@@ -14,7 +15,6 @@ from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 from jinja2 import Template
-from llama_index.core import Document
 from pydantic import BaseModel, Field
 from tenacity import retry, retry_if_exception, stop_after_attempt
 from tqdm.asyncio import tqdm
@@ -26,6 +26,27 @@ from app.chroma_rag import (
 )
 
 load_dotenv(".env")
+
+
+@dataclass
+class Document:
+    """Text + metadata carrier for one JSONL source document.
+
+    Replaces llama_index.core.Document, the only thing this repo used
+    llama-index for. Metadata is copied at construction so trimming a document
+    in process_chunk cannot mutate another holder's dict.
+    """
+
+    text: str
+    metadata: dict[str, Any]
+    doc_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.metadata = dict(self.metadata)
+
+    def get_content(self) -> str:
+        return self.text
+
 
 CONTEXT_MODEL = os.getenv("GEMINI_CONTEXT_MODEL", "gemini-3.1-flash-lite")
 CONTEXT_MAX_OUTPUT_TOKENS = 1000
@@ -41,7 +62,7 @@ RETRYABLE_GENAI_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 # detect docs whose content changed in place (doc_ids are path-based and stable
 # across edits, so id membership alone cannot catch this). update_docs_workflow
 # keeps its own copy of this constant so it does not have to import this
-# (Gemini/tiktoken/llama_index-heavy) module; tests assert the two stay in sync.
+# (Gemini/tiktoken-heavy) module; tests assert the two stay in sync.
 DOC_CONTENT_HASH_METADATA_KEY = "doc_content_hash"
 _genai_client: genai.Client | None = None
 _token_encoding = tiktoken.get_encoding("cl100k_base")
@@ -106,21 +127,7 @@ def create_docs(input_file: str) -> List[Document]:
                 Document(
                     doc_id=data["doc_id"],
                     text=data["content"],
-                    metadata=metadata,  # type: ignore
-                    excluded_llm_metadata_keys=[
-                        "title",
-                        "tokens",
-                        "retrieve_doc",
-                        "source",
-                        "content_hash",
-                    ],
-                    excluded_embed_metadata_keys=[
-                        "url",
-                        "tokens",
-                        "retrieve_doc",
-                        "source",
-                        "content_hash",
-                    ],
+                    metadata=metadata,
                 )
             )
     return documents

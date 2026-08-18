@@ -138,7 +138,7 @@ LLMS_TXT_SOURCES = list(LLMS_TXT_SOURCE_KEYS)
 # Node-metadata key stamped by add_context_to_nodes.process_chunk with the
 # source document's JSONL ``content_hash``. Deliberately duplicated here (not
 # imported) so this module keeps its light import footprint —
-# add_context_to_nodes pulls in Gemini/tiktoken/llama_index, which this
+# add_context_to_nodes pulls in Gemini/tiktoken, which this
 # module's importers and tests should not need.
 # tests/test_incremental_context.py asserts the two constants stay in sync.
 DOC_CONTENT_HASH_METADATA_KEY = "doc_content_hash"
@@ -396,7 +396,7 @@ def merge_contextual_nodes(
 
 def _add_context_for_new_docs(temp_file: str, reprocessed_doc_ids: Set[str]) -> None:
     """Generate context for the docs in ``temp_file`` and merge into the PKL."""
-    # Imported lazily: pulls in Gemini/tiktoken/llama_index, which the rest of
+    # Imported lazily: pulls in Gemini/tiktoken, which the rest of
     # this module (and its importers/tests) should not need.
     import asyncio
 

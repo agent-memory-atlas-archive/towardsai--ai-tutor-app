@@ -9,9 +9,8 @@ from unittest.mock import ANY, Mock, patch
 
 import chromadb
 import tiktoken
-from data.scraping_scripts.add_context_to_nodes import process
+from data.scraping_scripts.add_context_to_nodes import Document, process
 from data.scraping_scripts.create_vector_stores import write_retrieval_artifacts
-from llama_index.core import Document
 from app.chroma_rag import (
     BM25Index,
     ChunkRecord,
