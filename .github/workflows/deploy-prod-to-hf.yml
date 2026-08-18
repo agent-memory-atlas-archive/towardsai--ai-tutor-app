@@ -1,8 +1,10 @@
-name: Deploy prod to Hugging Face (ai-tutor-chatbot)
+name: Redeploy prod to Hugging Face (manual)
 
-# Manual-only promotion to the public prod Space. Run it from the Actions tab
-# after verifying the dev Space (ai-tutor) looks good. Deploys the ref you
-# pick in the "Run workflow" dropdown (defaults to main).
+# Manual escape hatch. Normal deploys happen automatically on every push to
+# main (sync-to-hf.yml); run this one from the Actions tab to force-push the
+# ref you pick in the "Run workflow" dropdown (defaults to main) without a
+# new commit -- e.g. after rotating Space secrets, retrying a failed sync
+# run, or rolling prod back to an older ref.
 on:
   workflow_dispatch:
 

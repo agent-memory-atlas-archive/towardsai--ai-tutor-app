@@ -11,7 +11,7 @@ ChromaDB for vectors; Cohere for embeddings/rerank; chat model is provider-confi
 ## Key URLs
 
 - [GitHub repo](https://github.com/towardsai/ai-tutor-app)
-- [Live demo — prod Space](https://huggingface.co/spaces/towardsai-tutors/ai-tutor-chatbot) · [Dev Space (private)](https://huggingface.co/spaces/towardsai-tutors/ai-tutor)
+- [Live demo — prod Space](https://huggingface.co/spaces/towardsai-tutors/ai-tutor-chatbot)
 - [Vector DB + KB bundle](https://huggingface.co/datasets/towardsai-tutors/ai-tutor-vector-db) (private; full corpus incl. courses) · [Public docs-only bundle](https://huggingface.co/datasets/towardsai-tutors/ai-tutor-vector-db-public) (no token needed; cold-start fallback) · [Private raw JSONL data](https://huggingface.co/datasets/towardsai-tutors/ai-tutor-data)
 
 ## Where things live
@@ -101,12 +101,12 @@ Chat runtime: `COHERE_API_KEY` (retrieval; always required), `DEEPSEEK_API_KEY` 
 
 ## Deployment
 
-Both HF Spaces run the same image (`Dockerfile`: FastAPI + Next.js static export, `ripgrep` installed for `run_kb_command`, port :7860), in a dev → prod flow:
+One HF Space runs the image (`Dockerfile`: FastAPI + Next.js static export, `ripgrep` installed for `run_kb_command`, port :7860). The private dev Space (`ai-tutor`) was retired in 2026-08 to free a public Space slot, so there is no staging hop:
 
-- **Dev — `ai-tutor`** (private): `.github/workflows/sync-to-hf.yml` force-pushes on every push to `main` (docs/markdown-only and scraping-script-only pushes are skipped via `paths-ignore`). Verify changes here first.
-- **Prod — `ai-tutor-chatbot`** (public): `.github/workflows/deploy-prod-to-hf.yml`, **manual trigger only** (Actions tab → "Deploy prod to Hugging Face (ai-tutor-chatbot)" → Run workflow).
+- **Prod — `ai-tutor-chatbot`** (public): `.github/workflows/sync-to-hf.yml` force-pushes on **every push to `main`** (docs/markdown-only and scraping-script-only pushes are skipped via `paths-ignore`). Merging to `main` IS deploying to public prod: keep `main` releasable and verify before merging (`uv run pytest`, and the live E2E suite for agent/API changes).
+- **Manual redeploy**: `.github/workflows/deploy-prod-to-hf.yml` (Actions tab → "Redeploy prod to Hugging Face (manual)") force-pushes a chosen ref without a new commit — for secret rotations, retrying a failed sync run, or rolling back to an older branch/tag.
 
-Both Spaces need the same runtime secrets (`COHERE_API_KEY`, model provider key, `HF_TOKEN`, optional `LANGSMITH_*`) configured in their HF settings.
+The Space needs the runtime secrets (`COHERE_API_KEY`, model provider key, `HF_TOKEN`, optional `LANGSMITH_*`) configured in its HF settings.
 
 ## Conventions
 
@@ -121,4 +121,4 @@ Both Spaces need the same runtime secrets (`COHERE_API_KEY`, model provider key,
 - `data/kb/` and `data/chroma-db-all_sources/` are build artifacts — never commit or hand-edit; regenerate or re-download.
 - Two `AGENTS.md` files: this root one (repo dev guidance) vs `data/kb/AGENTS.md` (generated runtime KB rules).
 - Source config lives in `source_registry.py`, not `app/config.py` / `process_md_files.py` (older docs were wrong).
-- **Eval data must never enter git.** `data/eval/` and `runs/` contain real student text; pushes to `main` get force-pushed to HF Spaces (prod is **public**), so a committed data file becomes world-readable on the next deploy. The gitignore rules covering `*.jsonl`, `data/eval/review_batches/`, `data/eval/review_log_v1.md`, and `runs/` are load-bearing — never weaken them; share via the private `ai-tutor-data` dataset instead.
+- **Eval data must never enter git.** `data/eval/` and `runs/` contain real student text; every push to `main` now force-pushes the **public** prod Space directly (no dev hop), so a committed data file becomes world-readable on the next push. The gitignore rules covering `*.jsonl`, `data/eval/review_batches/`, `data/eval/review_log_v1.md`, and `runs/` are load-bearing — never weaken them; share via the private `ai-tutor-data` dataset instead.
