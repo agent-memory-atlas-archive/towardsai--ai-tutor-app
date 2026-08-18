@@ -228,16 +228,33 @@ class ModelPricing:
 # public; prices move. Keys match by longest prefix so dated variants
 # ("claude-haiku-4-5-20251001") hit their family entry.
 #
-# Sources checked 2026-06-13:
+# Sources checked 2026-08-14:
 # - https://ai.google.dev/gemini-api/docs/pricing
 # - https://platform.claude.com/docs/en/about-claude/pricing
+# - https://api-docs.deepseek.com/quick_start/pricing
+# - https://developers.openai.com/api/docs/pricing
 MODEL_PRICING: dict[str, ModelPricing] = {
     "gemini-3.5-flash": ModelPricing(input=1.50, output=9.00, cache_read=0.15),
-    # Gemini 2.5 Flash (used by the knowledge-compaction study). Implicit
-    # caching read is ~25% of input.
-    "gemini-2.5-flash": ModelPricing(input=0.30, output=2.50, cache_read=0.075),
+    # Gemini 3.5 Flash Lite: the rescue fallback (config.FALLBACK_MODEL_NAME).
+    # Same list price as gemini-2.5-flash, cached tokens likewise $0.03 (10% of
+    # input; the hourly explicit-cache storage price is not represented, same
+    # as the other Gemini entries). The key must stay longer than
+    # "gemini-3.5-flash" or prefix matching would price Lite turns at the
+    # non-Lite rates.
+    "gemini-3.5-flash-lite": ModelPricing(input=0.30, output=2.50, cache_read=0.03),
+    # Gemini 2.5 Flash (used by the knowledge-compaction study; fallback until
+    # 2026-08). Cached tokens are $0.03 (10% of input) since Google's reprice;
+    # the earlier ~25%-of-input rate ($0.075) is stale.
+    "gemini-2.5-flash": ModelPricing(input=0.30, output=2.50, cache_read=0.03),
     "claude-haiku-4-5": ModelPricing(
         input=1.00, output=5.00, cache_read=0.10, cache_write=1.25
+    ),
+    # GPT-5.6 Luna (OpenAI, priced after the 2026-07-30 ~80% cut). Cache writes
+    # bill at 1.25x input. Not representable here: the long-context tier
+    # (requests with >272K input tokens re-rate the FULL request at 2x input /
+    # 1.5x output) — flat pricing understates such turns.
+    "gpt-5.6-luna": ModelPricing(
+        input=0.20, output=1.20, cache_read=0.02, cache_write=0.25
     ),
     # DeepSeek-V4-Flash via OpenRouter (slug "deepseek/deepseek-v4-flash").
     # Kept for the openrouter provider path; unused now that evals run on the
@@ -247,10 +264,14 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     ),
     # DeepSeek-V4-Flash, DeepSeek FIRST-PARTY API (base https://api.deepseek.com,
     # model id "deepseek-v4-flash" — the id the API echoes back, so this is the
-    # key usage_by_model resolves against). Per-1M-token pricing verified against
-    # DeepSeek's price page 2026-06-19: $0.14 cache-miss input / $0.28 output /
-    # $0.0028 cache-hit input (the ~50x cache discount that drives the cost test).
-    "deepseek-v4-flash": ModelPricing(input=0.14, output=0.28, cache_read=0.0028),
+    # key usage_by_model resolves against). DeepSeek moved to peak/off-peak
+    # billing effective 2026-08-16 16:00 UTC (per api-docs.deepseek.com pricing,
+    # checked 2026-08-14): peak (01:00-04:00 and 06:00-10:00 UTC) $0.44 cache-miss
+    # input / $1.32 output / $0.014 cache-hit input; off-peak is 50% of peak.
+    # ModelPricing is deliberately flat so saved eval runs re-price
+    # deterministically, so we store the hours-weighted blend (7h peak + 17h
+    # off-peak per day). The ~31x cache discount still drives the cost test.
+    "deepseek-v4-flash": ModelPricing(input=0.2842, output=0.8525, cache_read=0.00904),
 }
 
 

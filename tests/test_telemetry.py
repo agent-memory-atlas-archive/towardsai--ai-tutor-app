@@ -107,9 +107,11 @@ class CostEstimateTests(unittest.TestCase):
         }
         breakdown = aggregate_cost_breakdown(usage)
         self.assertIsNotNone(breakdown)
-        self.assertAlmostEqual(breakdown["cache_miss_input_usd"], 0.014)
-        self.assertAlmostEqual(breakdown["cache_read_input_usd"], 0.00252)
-        self.assertAlmostEqual(breakdown["output_usd"], 0.028)
+        # Blended post-2026-08-16 rates: $0.2842 cache-miss / $0.00904 cache-hit
+        # input, $0.8525 output per 1M tokens (see MODEL_PRICING).
+        self.assertAlmostEqual(breakdown["cache_miss_input_usd"], 0.02842)
+        self.assertAlmostEqual(breakdown["cache_read_input_usd"], 0.008136)
+        self.assertAlmostEqual(breakdown["output_usd"], 0.08525)
         self.assertAlmostEqual(
             breakdown["total_usd"],
             breakdown["cache_miss_input_usd"]
@@ -267,9 +269,10 @@ class LangchainOpenAICacheFieldContractTests(unittest.TestCase):
         self.assertEqual(call["cache_read_tokens"], 900)
         self.assertEqual(call["cache_miss_tokens"], 100)
         self.assertTrue(call["cache_details_reported"])
-        # deepseek-v4-flash: $0.14 miss / $0.0028 cache-read / $0.28 output
-        # per MTok, so the cache discount must show up in the billed cost.
-        expected = (100 * 0.14 + 900 * 0.0028 + 100 * 0.28) / 1_000_000
+        # deepseek-v4-flash blended rates: $0.2842 miss / $0.00904 cache-read /
+        # $0.8525 output per MTok, so the cache discount must show up in the
+        # billed cost.
+        expected = (100 * 0.2842 + 900 * 0.00904 + 100 * 0.8525) / 1_000_000
         self.assertAlmostEqual(call["cost"]["total_usd"], expected)
 
 
