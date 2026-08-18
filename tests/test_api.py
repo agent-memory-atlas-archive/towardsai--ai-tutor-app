@@ -210,7 +210,7 @@ class ApiTestCase(unittest.TestCase):
             "enabledTools": ["web_search", "not_a_real_tool"],
             # The toggle passthrough below needs a model that offers web_search,
             # and no selectable model does today (DeepSeek has no web toggles;
-            # gemini-2.5-flash is fallback-only). Re-admit Claude Haiku for this
+            # gemini-3.5-flash-lite is fallback-only). Re-admit Claude Haiku for this
             # request only.
             "model": "anthropic:claude-haiku-4-5",
             "threadId": "thread_0",
@@ -1501,6 +1501,107 @@ def test_live_api_stream_obeys_shell_only_instruction() -> None:
     assert "retrieve_tutor_context" not in tool_names
     assert "LoRA" in live_answer_text(parts)
     assert live_sources(parts)
+
+
+@LIVE_API_E2E
+def test_live_fallback_rescues_outage_then_recovers_to_primary() -> None:
+    """The turn-level rescue, end to end with real API calls.
+
+    The outage is a genuine network failure: the DeepSeek client is pointed at
+    a dead local port, so the primary attempt dies with a real connection
+    refusal (after the client's own retries). The rescue then serves the turn
+    on the REAL Gemini fallback, and the follow-up turn recovers to REAL
+    DeepSeek on a fresh plain-text thread via the provider-mismatch branch.
+    """
+    require_live_api_e2e_prereqs()
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        pytest.skip("DEEPSEEK_API_KEY is required for the live fallback test.")
+
+    from app import chat_service
+
+    dead_port = free_port()  # nothing listens on it: instant ECONNREFUSED
+
+    class UnreachableDeepSeek(chat_service.TutorChatDeepSeek):
+        def __init__(self, **kwargs):
+            kwargs["base_url"] = f"http://127.0.0.1:{dead_port}"
+            kwargs["max_retries"] = 1  # keep the doomed primary attempt quick
+            super().__init__(**kwargs)
+
+    first_prompt = "In one short sentence, what does LoRA stand for?"
+    follow_up_prompt = "Thanks. In one word: is LoRA a PEFT method?"
+
+    chat_service.build_agent.cache_clear()
+    try:
+        with live_api_server() as port:
+            with patch.object(chat_service, "TutorChatDeepSeek", UnreachableDeepSeek):
+                first_parts = post_live_api_chat(
+                    port, live_chat_payload([live_user_message(first_prompt)])
+                )
+            chat_service.build_agent.cache_clear()  # drop sabotaged clients
+
+            part_types = live_part_types(first_parts)
+            assert "finish" in part_types
+            assert "error" not in part_types
+            assert live_answer_text(first_parts)
+            first_thread = live_thread_id(first_parts)
+            assert first_thread
+            # The rescue really served on the fallback provider.
+            assert chat_service._get_thread_provider(first_thread) == "google-genai", (
+                "rescued turn should leave a fallback-owned thread"
+            )
+
+            follow_up_messages = [
+                live_user_message(first_prompt),
+                live_assistant_message(first_parts),
+                live_user_message(follow_up_prompt),
+            ]
+            second_parts = post_live_api_chat(
+                port, live_chat_payload(follow_up_messages, thread_id=first_thread)
+            )
+
+            part_types = live_part_types(second_parts)
+            assert "finish" in part_types
+            assert "error" not in part_types
+            assert live_answer_text(second_parts)
+            second_thread = live_thread_id(second_parts)
+            # Recovery: healthy DeepSeek serves on a FRESH plain-text thread
+            # (continuing the Gemini-owned thread would replay foreign blocks).
+            assert second_thread and second_thread != first_thread, (
+                "recovery turn must branch off the fallback-owned thread"
+            )
+            assert chat_service._get_thread_provider(second_thread) == "deepseek"
+    finally:
+        chat_service.build_agent.cache_clear()
+
+
+@LIVE_API_E2E
+def test_live_fallback_never_rescues_request_errors() -> None:
+    """A real 401 from DeepSeek (invalid key) is our-side error class: the
+    turn must fail visibly with an error part, never be laundered through the
+    Gemini fallback."""
+    require_live_api_e2e_prereqs()
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        pytest.skip("DEEPSEEK_API_KEY is required for the live fallback test.")
+
+    from app import chat_service
+
+    chat_service.build_agent.cache_clear()
+    try:
+        with live_api_server() as port:
+            with patch.dict(
+                os.environ, {"DEEPSEEK_API_KEY": "sk-invalid-key-on-purpose"}
+            ):
+                parts = post_live_api_chat(
+                    port, live_chat_payload([live_user_message("Say OK.")])
+                )
+        part_types = live_part_types(parts)
+        assert "error" in part_types
+        # Gemini never served this thread.
+        thread_id = live_thread_id(parts)
+        if thread_id:
+            assert chat_service._get_thread_provider(thread_id) != "google-genai"
+    finally:
+        chat_service.build_agent.cache_clear()
 
 
 if __name__ == "__main__":

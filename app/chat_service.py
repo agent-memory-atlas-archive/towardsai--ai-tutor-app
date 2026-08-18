@@ -83,10 +83,10 @@ from .provider_events import (
 from .config import (
     BM25_INDEX_PATH,
     COURSE_SOURCE_KEYS,
-    DEEPSEEK_DIRECT_MODEL_NAME,
+    DEFAULT_MODEL_NAME,
     DEFAULT_SELECTED_SOURCE_KEYS,
     DOCUMENT_DICT_PATH,
-    GEMINI_FALLBACK_MODEL_NAME,
+    FALLBACK_MODEL_NAME,
     SOURCE_KEY_TO_LABEL,
     VECTOR_COLLECTION_NAME,
     VECTOR_DB_DIR,
@@ -1000,12 +1000,22 @@ def format_tool_args(args: Any) -> str:
     return str(args).strip()
 
 
-def _has_google_genai_key() -> bool:
-    return bool(os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"))
+# Env vars holding each provider's API key; providers absent from this map
+# (e.g. ollama) need none. Keys match model_provider_and_name output.
+PROVIDER_KEY_ENVS: dict[str, tuple[str, ...]] = {
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "google-genai": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+}
 
 
-def _has_deepseek_key() -> bool:
-    return bool(os.environ.get("DEEPSEEK_API_KEY"))
+def has_provider_key(provider: str) -> bool:
+    env_names = PROVIDER_KEY_ENVS.get(provider)
+    if env_names is None:
+        return True
+    return any(os.environ.get(name) for name in env_names)
 
 
 def _build_chat_model_client(provider_model: str, include_thoughts: bool = False):
@@ -1112,76 +1122,99 @@ def _build_chat_model_client(provider_model: str, include_thoughts: bool = False
     )
 
 
-def build_chat_model(model_name: str, include_thoughts: bool = False):
-    """Build the chat client for a turn, with the DeepSeek->Gemini rescue path.
+def resolve_served_model_name(model_name: str) -> str:
+    """Resolve which model actually serves, before any thread state is touched.
 
-    ONE THREAD IS ONE PROVIDER. Read this before touching the fallback.
+    Key-availability substitution: when the DEFAULT model's provider key is
+    missing but the fallback's is set, the fallback IS the model for every
+    turn of this process -- provider-consistent from turn 0, so threads never
+    flip providers mid-conversation. Distinct from the per-turn outage rescue
+    in stream_chat.
+    """
+    provider_model = normalize_model_name(model_name)
+    if provider_model != DEFAULT_MODEL_NAME:
+        return provider_model
+    if has_provider_key(model_provider_and_name(provider_model)[0]):
+        return provider_model
+    fallback = normalize_model_name(FALLBACK_MODEL_NAME)
+    if fallback != provider_model and has_provider_key(
+        model_provider_and_name(fallback)[0]
+    ):
+        logger.warning(
+            "No provider key is set for %s; serving %s instead.",
+            provider_model,
+            fallback,
+        )
+        return fallback
+    return provider_model
+
+
+def rescue_model_for(serving_model: str) -> str | None:
+    """The model a failed turn may be retried on, or None.
+
+    Only the DEFAULT model gets a rescue -- a deliberately selected
+    non-default model failing should fail visibly -- and only when the
+    fallback is a different model whose provider key is configured.
+    """
+    if normalize_model_name(serving_model) != DEFAULT_MODEL_NAME:
+        return None
+    fallback = normalize_model_name(FALLBACK_MODEL_NAME)
+    if fallback == normalize_model_name(serving_model):
+        return None
+    if not has_provider_key(model_provider_and_name(fallback)[0]):
+        return None
+    return fallback
+
+
+def is_provider_outage_error(exc: BaseException) -> bool:
+    """Outage-class errors: connectivity, timeouts, 429, and 5xx.
+
+    4xx request errors are OUR bugs; they must surface, never be laundered
+    through a fallback model. Shared by the turn-level rescue in stream_chat
+    and the summarization middleware's in-process retries.
+    """
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status in {408, 409, 425, 429} or status >= 500
+    return type(exc).__name__ in {
+        "APIConnectionError",
+        "APITimeoutError",
+        "InternalServerError",
+        "RateLimitError",
+    }
+
+
+def build_chat_model(model_name: str, include_thoughts: bool = False):
+    """Build the chat client for exactly ONE provider's model.
+
+    ONE THREAD IS ONE PROVIDER -- and one client serves one model, on purpose.
 
     A thread's checkpoint stores PROVIDER-NATIVE message objects, not plain
     text: Gemini reasoning parts carry thought signatures, Anthropic thinking
     blocks carry a required cryptographic `signature`, and each provider's
-    server-side tool calls are its own block types. Those payloads are not
-    portable. Replaying one provider's checkpointed history to another is a
-    hard API error, not a degraded answer. Both directions are verified:
+    server-side tool calls are its own block types. Replaying one provider's
+    checkpointed history to another is a hard API error, not a degraded
+    answer (verified: Gemini history -> DeepSeek 400s; Gemini history ->
+    Anthropic 400s on the missing thinking signature).
 
-      Gemini history -> DeepSeek     400 (OpenAI-compatible parser rejects it)
-      Gemini history -> Anthropic    400 "messages.1.content.0.thinking.
-                                     signature: Field required"
-
-    So a fallback is NOT a free "try another model" switch. It is safe here
-    only because of two properties, and it stops being safe if either breaks:
-
-      1. The fallback answers the SAME request the primary just failed, so it
-         reads its own request payload, never a foreign checkpoint.
-      2. build_agent binds tools from the REQUESTED model (deepseek), which has
-         no provider-native web tools, so the fallback is never handed Gemini's
-         google_search/url_context alongside our custom function tools -- a
-         combination gemini-2.5-flash cannot accept (see config.
-         GEMINI_FALLBACK_MODEL_NAME for why).
-
-    A rescued turn still writes GEMINI-shaped messages into a DeepSeek thread's
-    checkpoint. That used to strand the thread: the next DeepSeek turn replayed
-    foreign history, 400'd, and silently fell back again, migrating the thread
-    to Gemini at ~10x the token price forever. It is contained OUTSIDE this
-    function -- sync_thread_with_history records the serving provider per thread
-    and branches to a fresh plain-text thread on mismatch. Do not "fix" that by
-    adding provider translation or another fallback here.
-
-    If you are here to add a fallback, a retry-on-another-provider, or
-    mid-conversation model switching: do not wire it at this layer. Route it
-    through sync_thread_with_history's plain-text branch, which drops the
-    unportable state on purpose.
+    Because of that, NO cross-provider fallback is wired at this layer. A
+    with_fallbacks client only works for pairings whose primary happens to
+    write lowest-common-denominator output -- an overfit trap (this repo shipped
+    exactly that for DeepSeek->Gemini and later removed it). All cross-provider
+    movement -- the turn-level outage rescue in stream_chat, a config repoint,
+    a model deprecation -- goes through sync_thread_with_history's plain-text
+    branch, which reseeds the visible transcript on a fresh thread and works
+    for ANY primary/fallback pairing. Key-availability substitution lives in
+    resolve_served_model_name, also outside this layer.
     """
-    provider_model = normalize_model_name(model_name)
-    if provider_model != DEEPSEEK_DIRECT_MODEL_NAME:
-        return _build_chat_model_client(
-            provider_model,
-            include_thoughts=include_thoughts,
-        )
-    if not _has_deepseek_key() and _has_google_genai_key():
-        logger.warning(
-            "No DEEPSEEK_API_KEY is set for %s; using Gemini fallback %s.",
-            DEEPSEEK_DIRECT_MODEL_NAME,
-            GEMINI_FALLBACK_MODEL_NAME,
-        )
-        return _build_chat_model_client(
-            GEMINI_FALLBACK_MODEL_NAME,
-            include_thoughts=include_thoughts,
-        )
-    model = _build_chat_model_client(provider_model, include_thoughts=include_thoughts)
-    if not _has_google_genai_key():
-        logger.warning(
-            "Gemini fallback %s is configured for %s, but no GOOGLE_API_KEY or "
-            "GEMINI_API_KEY is set; using DeepSeek only.",
-            GEMINI_FALLBACK_MODEL_NAME,
-            DEEPSEEK_DIRECT_MODEL_NAME,
-        )
-        return model
-    fallback = _build_chat_model_client(
-        GEMINI_FALLBACK_MODEL_NAME,
-        include_thoughts=include_thoughts,
+    return _build_chat_model_client(
+        normalize_model_name(model_name), include_thoughts=include_thoughts
     )
-    return model.with_fallbacks([fallback])
 
 
 class GeminiServerSideToolsMiddleware(AgentMiddleware):
@@ -1344,7 +1377,7 @@ class DeepSeekCacheIsolationMiddleware(AgentMiddleware):
         settings = dict(getattr(request, "model_settings", None) or {})
         model = getattr(request, "model", None)
         model_extra_body: Any = None
-        # Runnable bindings/fallbacks wrap the underlying provider model. Keep
+        # Runnable bindings wrap the underlying provider model. Keep
         # its DeepSeek thinking toggle when adding the experiment-only user_id;
         # a call-time extra_body otherwise replaces the model-level mapping.
         for _ in range(4):
@@ -1542,20 +1575,7 @@ class InstrumentedSummarizationMiddleware(SummarizationMiddleware):
 
     @staticmethod
     def _is_retryable_exception(exc: BaseException) -> bool:
-        if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
-            return True
-        status = getattr(exc, "status_code", None)
-        if status is None:
-            response = getattr(exc, "response", None)
-            status = getattr(response, "status_code", None)
-        if isinstance(status, int):
-            return status in {408, 409, 425, 429} or status >= 500
-        return type(exc).__name__ in {
-            "APIConnectionError",
-            "APITimeoutError",
-            "InternalServerError",
-            "RateLimitError",
-        }
+        return is_provider_outage_error(exc)
 
     @staticmethod
     def _retry_reason(exc: BaseException) -> str:
@@ -2654,11 +2674,16 @@ def agent_run_config(
     active_thread_id: str,
     message_id: str,
     memory_preset: str = "",
+    serving_model_name: str = "",
 ) -> dict[str, Any]:
-    provider, actual_model = model_provider_and_name(request.model_name)
+    # Tags and metadata describe the model that actually SERVES the turn (the
+    # outage rescue and key substitution can differ from the request);
+    # metadata.requested_model keeps what the client asked for.
+    served_model = serving_model_name or request.model_name
+    provider, actual_model = model_provider_and_name(served_model)
     deployment_environment, deployment_host = langsmith_deployment_identity()
     tools = effective_tool_names(
-        request.model_name,
+        served_model,
         request.enabled_tools,
         include_local_tools=bool(request.source_keys),
         disable_kb=bool(request.disable_kb),
@@ -2667,7 +2692,7 @@ def agent_run_config(
         SOURCE_KEY_TO_LABEL.get(source_key, source_key)
         for source_key in request.source_keys
     ]
-    preset = memory_preset or resolve_memory_preset(model_name=request.model_name).name
+    preset = memory_preset or resolve_memory_preset(model_name=served_model).name
     config = thread_config(active_thread_id)
     config.update(
         {
@@ -2730,7 +2755,7 @@ async def _update_student_profile(
     The call reports into ``usage_handler`` so profile-memory presets pay for
     their own upkeep in the turn's token/cost numbers.
     """
-    model = build_chat_model(request.model_name)
+    model = build_chat_model(resolve_served_model_name(request.model_name))
     prompt = _PROFILE_UPDATE_PROMPT.format(
         profile=get_student_profile(request.student_id) or "(empty)",
         query=request.query[:1500],
@@ -2750,14 +2775,18 @@ async def _update_student_profile(
     set_student_profile(request.student_id, text[:1200])
 
 
+async def _prepend_chunks(
+    probe_chunks: list[Any], rest: AsyncIterator[Any]
+) -> AsyncIterator[Any]:
+    """Re-attach the probe chunks stream_chat pulled to decide on a rescue."""
+    for chunk in probe_chunks:
+        yield chunk
+    async for chunk in rest:
+        yield chunk
+
+
 async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatEvent]:
     turn_started = time.monotonic()
-    # Raises on unknown/incompatible preset names: a mislabeled experiment run
-    # must fail, not silently fall back. The API layer pre-validates to a 422.
-    memory_config = resolve_memory_preset(
-        request.memory_preset,
-        model_name=request.model_name,
-    )
     # Token usage and call counts come from the model calls themselves
     # (middleware summarization and profile updates included), so eval runs
     # never depend on LangSmith being enabled or within plan limits.
@@ -2781,15 +2810,6 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatEvent]:
     # Per-turn tally for middlewares whose effect never reaches the checkpoint
     # (sliding window, truncation, ...); merged into context_stats below.
     reset_turn_signals(message_id)
-    include_reasoning = bool(request.include_reasoning) and (
-        is_google_genai_model(request.model_name)
-        or is_anthropic_model(request.model_name)
-        or is_deepseek_model(request.model_name)
-    )
-    # Gemini streams each thought summary as one complete block; Anthropic
-    # streams partial fragments of a single thought. The encoder uses this to
-    # decide whether consecutive deltas need a paragraph break between them.
-    reasoning_deltas_are_blocks = is_google_genai_model(request.model_name)
     google_search = GoogleSearchActivity(message_id, web_evidence)
     include_local_tools = bool(request.source_keys)
     disable_kb = bool(request.disable_kb)
@@ -2804,48 +2824,79 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatEvent]:
 
     logger.info("Running query: %s", request.query)
 
-    # Agent construction (model client + middlewares on a cache miss) and the
-    # checkpointer sync are synchronous; run them off the event loop so one
-    # request's setup doesn't stall every other in-flight SSE stream.
-    def _build_agent_for_request():
-        return build_agent(
-            request.model_name,
-            enabled_tools=tuple(request.enabled_tools),
-            include_thoughts=include_reasoning,
-            kb_agents_instructions=(
-                ensure_kb_agents_instructions()
-                if (include_local_tools and not disable_kb)
-                else None
-            ),
-            include_local_tools=include_local_tools,
-            disable_kb=disable_kb,
-            memory_config=memory_config,
+    # Everything the serving model determines -- memory preset, reasoning
+    # flags, agent, thread sync (keyed on the SERVING provider), run config --
+    # is derived inside this loop, and re-derived when the outage rescue swaps
+    # the serving model. Nothing has been streamed yet at that point, so a
+    # rescue restarts the turn invisibly on a plain-text thread branch; once
+    # the first chunk arrives the serving model is locked for the turn and
+    # later failures surface through the normal error path.
+    serving_model_name = resolve_served_model_name(request.model_name)
+    rescue_attempted = False
+    while True:
+        # Raises on unknown/incompatible preset names: a mislabeled experiment
+        # run must fail, not silently fall back. The API layer pre-validates
+        # the requested model to a 422.
+        memory_config = resolve_memory_preset(
+            request.memory_preset,
+            model_name=serving_model_name,
         )
+        include_reasoning = bool(request.include_reasoning) and (
+            is_google_genai_model(serving_model_name)
+            or is_anthropic_model(serving_model_name)
+            or is_deepseek_model(serving_model_name)
+        )
+        # Gemini streams each thought summary as one complete block; Anthropic
+        # streams partial fragments of a single thought. The encoder uses this
+        # to decide whether consecutive deltas need a paragraph break.
+        reasoning_deltas_are_blocks = is_google_genai_model(serving_model_name)
 
-    agent = await asyncio.to_thread(_build_agent_for_request)
-    _evict_idle_threads()
-    active_thread_id, fork_checkpoint_id = await asyncio.to_thread(
-        sync_thread_with_history,
-        agent,
-        request.thread_id.strip() or new_thread_id(),
-        normalized_history,
-        model_provider_and_name(request.model_name)[0],
-    )
-    _touch_thread(active_thread_id)
-    run_config = agent_run_config(
-        request, active_thread_id, message_id, memory_config.name
-    )
-    run_config["callbacks"] = [usage_handler]
-    if fork_checkpoint_id:
-        # Time travel: run from the checkpoint matching the history the
-        # client kept; the turns after it become an abandoned branch.
-        run_config["configurable"]["checkpoint_id"] = fork_checkpoint_id
+        # Agent construction (model client + middlewares on a cache miss) and
+        # the checkpointer sync are synchronous; run them off the event loop
+        # so one request's setup doesn't stall other in-flight SSE streams.
+        def _build_agent_for_request(
+            model_name=serving_model_name,
+            memory_config=memory_config,
+            include_thoughts=include_reasoning,
+        ):
+            return build_agent(
+                model_name,
+                enabled_tools=tuple(request.enabled_tools),
+                include_thoughts=include_thoughts,
+                kb_agents_instructions=(
+                    ensure_kb_agents_instructions()
+                    if (include_local_tools and not disable_kb)
+                    else None
+                ),
+                include_local_tools=include_local_tools,
+                disable_kb=disable_kb,
+                memory_config=memory_config,
+            )
 
-    yield ChatEvent("thread_started", {"thread_id": active_thread_id})
-    yield ChatEvent("message_started", {"message_id": message_id})
+        agent = await asyncio.to_thread(_build_agent_for_request)
+        _evict_idle_threads()
+        active_thread_id, fork_checkpoint_id = await asyncio.to_thread(
+            sync_thread_with_history,
+            agent,
+            request.thread_id.strip() or new_thread_id(),
+            normalized_history,
+            model_provider_and_name(serving_model_name)[0],
+        )
+        _touch_thread(active_thread_id)
+        run_config = agent_run_config(
+            request,
+            active_thread_id,
+            message_id,
+            memory_config.name,
+            serving_model_name=serving_model_name,
+        )
+        run_config["callbacks"] = [usage_handler]
+        if fork_checkpoint_id:
+            # Time travel: run from the checkpoint matching the history the
+            # client kept; the turns after it become an abandoned branch.
+            run_config["configurable"]["checkpoint_id"] = fork_checkpoint_id
 
-    try:
-        async for chunk in agent.astream(
+        agent_stream = agent.astream(
             {"messages": [{"role": "user", "content": request.query}]},
             run_config,
             context=AppContext(
@@ -2859,7 +2910,62 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatEvent]:
             ),
             stream_mode=["messages", "updates"],
             version="v2",
-        ):
+        )
+        probe_chunks: list[Any] = []
+        try:
+            # Middleware nodes (request shaping, compaction) emit "updates"
+            # chunks before the first model call, and none of them produce
+            # client-visible events. Probe up to the first MAIN-model token so
+            # an outage on the model call itself is still rescued; a
+            # summarization model call streams first on compacting turns, so
+            # its tagged chunks do not end the probe.
+            while True:
+                chunk = await anext(agent_stream, None)
+                if chunk is None:
+                    break
+                probe_chunks.append(chunk)
+                if chunk["type"] != "messages":
+                    continue
+                _probe_token, probe_metadata = chunk["data"]
+                if probe_metadata.get("lc_source") != "summarization":
+                    break
+        except Exception as exc:
+            rescue_model = (
+                None if rescue_attempted else rescue_model_for(serving_model_name)
+            )
+            if rescue_model is None or not is_provider_outage_error(exc):
+                # Mirror the stream finally below for a turn that died before
+                # its first chunk, so the client's next request still matches
+                # this thread.
+                transcript = normalized_history + (
+                    ChatTurn("user", request.query.strip()),
+                    ChatTurn("assistant", ""),
+                )
+                _record_thread_transcript(active_thread_id, transcript)
+                _record_fork_point(
+                    active_thread_id,
+                    len(transcript),
+                    _latest_checkpoint_id(agent, active_thread_id),
+                )
+                raise
+            logger.warning(
+                "Serving model %s failed before its first chunk (%s: %s); "
+                "rescuing the turn on %s via a plain-text thread branch.",
+                serving_model_name,
+                type(exc).__name__,
+                exc,
+                rescue_model,
+            )
+            serving_model_name = rescue_model
+            rescue_attempted = True
+            continue
+        break
+
+    yield ChatEvent("thread_started", {"thread_id": active_thread_id})
+    yield ChatEvent("message_started", {"message_id": message_id})
+
+    try:
+        async for chunk in _prepend_chunks(probe_chunks, agent_stream):
             if chunk["type"] == "messages":
                 token, metadata = chunk["data"]
                 if not isinstance(token, AIMessageChunk):

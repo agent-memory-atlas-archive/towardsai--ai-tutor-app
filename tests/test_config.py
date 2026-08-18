@@ -14,22 +14,22 @@ from app import config
 def test_default_chat_model_prefers_deepseek_direct_with_gemini_fallback() -> None:
     assert config.DEFAULT_MODEL_NAME == config.DEEPSEEK_DIRECT_MODEL_NAME
     assert config.DEFAULT_MODEL_NAME == "deepseek:deepseek-v4-flash"
-    assert config.GEMINI_FALLBACK_MODEL_NAME == "google-genai:gemini-2.5-flash"
+    assert config.FALLBACK_MODEL_NAME == "google-genai:gemini-3.5-flash-lite"
     assert config.AVAILABLE_MODELS[0]["id"] == config.DEFAULT_MODEL_NAME
 
 
 def test_gemini_fallback_model_is_deliberately_not_selectable() -> None:
     """The rescue model must never reach the picker.
 
-    gemini-2.5-flash cannot combine Gemini's built-in web tools with our custom
-    function tools (that needs Gemini 3+ tool context circulation), and the
-    agent always binds retrieve_tutor_context + run_kb_command. Selecting it
-    would therefore be one web-search toggle away from a 400. It is safe as a
-    fallback only because the fallback is never handed web tools.
+    With gemini-3.5-flash-lite (Gemini 3+, so it could combine web tools with
+    our custom tools) this is a product choice, one selectable model plus a
+    rescue path, rather than the hard API constraint it was for 2.5-flash. The
+    fallback still never receives web tools: build_agent binds them from the
+    requested model (DeepSeek), which has none.
     """
     selectable = [model["id"] for model in config.AVAILABLE_MODELS]
 
-    assert config.GEMINI_FALLBACK_MODEL_NAME not in selectable
+    assert config.FALLBACK_MODEL_NAME not in selectable
     assert selectable == ["deepseek:deepseek-v4-flash"]
 
 

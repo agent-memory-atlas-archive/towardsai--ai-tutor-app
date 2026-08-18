@@ -76,7 +76,7 @@ class MemoryPresetResolutionTests(unittest.TestCase):
             )
             self.assertEqual(
                 resolve_memory_preset(
-                    None, model_name="google-genai:gemini-2.5-flash"
+                    None, model_name="google-genai:gemini-3.5-flash-lite"
                 ).name,
                 "prod_v2",
             )
@@ -96,7 +96,9 @@ class MemoryPresetResolutionTests(unittest.TestCase):
             memory_preset_supports_model("prod_v2", "deepseek:deepseek-v4-flash")
         )
         self.assertTrue(
-            memory_preset_supports_model("prod_v2", "google-genai:gemini-2.5-flash")
+            memory_preset_supports_model(
+                "prod_v2", "google-genai:gemini-3.5-flash-lite"
+            )
         )
         self.assertFalse(
             memory_preset_supports_model("prod_v2", "anthropic:claude-haiku-4-5")

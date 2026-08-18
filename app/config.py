@@ -74,25 +74,25 @@ DEFAULT_MODEL_NAME = DEEPSEEK_DIRECT_MODEL_NAME
 
 # Two distinct roles, deliberately kept apart:
 #
-#   AVAILABLE_MODELS          models a user may SELECT (the /api/tools picker;
-#                             build_chat_request 422s on anything else).
-#   GEMINI_FALLBACK_MODEL_NAME  rescue-only. Never selectable — see below.
+#   AVAILABLE_MODELS     models a user may SELECT (the /api/tools picker;
+#                        build_chat_request 422s on anything else).
+#   FALLBACK_MODEL_NAME  rescue-only. Never selectable (asserted in
+#                        tests/test_config.py so this cannot drift back).
 #
-# The fallback is NOT in AVAILABLE_MODELS on purpose, and the pairing is
-# asserted in tests/test_config.py so this cannot drift back.
+# The pairing is free to change: primary and fallback can be ANY two
+# provider:model strings. The rescue happens at the turn level in stream_chat
+# and crosses providers only through sync_thread_with_history's plain-text
+# branch, so no provider-portability assumption ties these two together. If
+# the DEFAULT model's provider key is missing but the fallback's is set, the
+# fallback serves every turn outright (resolve_served_model_name in
+# app/chat_service.py).
 #
-# Why gemini-2.5-flash may serve traffic but must never be selectable:
-# combining Gemini's server-side tools (google_search, url_context) with our
-# custom function tools in one request needs `tool_config.
-# include_server_side_tool_invocations`, and that flag is a Gemini 3+ preview
-# feature ("tool context circulation"). Sending it to a 2.5 model returns
-# 400 INVALID_ARGUMENT; omitting it makes 2.5 reject the tool mix anyway. The
-# agent ALWAYS binds retrieve_tutor_context + run_kb_command, so a selectable
-# 2.5 would be one web-search toggle away from a hard failure. As a fallback it
-# is safe: the fallback never gets web tools, because build_agent binds them
-# from the REQUESTED model (deepseek), which has none. See build_chat_model in
-# app/chat_service.py.
-GEMINI_FALLBACK_MODEL_NAME = "google-genai:gemini-2.5-flash"
+# On gemini-3.5-flash-lite: same list price as the prior gemini-2.5-flash
+# fallback, and as a Gemini 3-series model it could combine web tools with our
+# custom tools ("tool context circulation") — keeping it out of the picker is
+# a product choice (one selectable model plus a rescue path), not the API
+# constraint it was for pre-3 Gemini.
+FALLBACK_MODEL_NAME = "google-genai:gemini-3.5-flash-lite"
 
 AVAILABLE_MODELS: tuple[dict[str, str], ...] = (
     {
@@ -293,7 +293,7 @@ __all__ = [
     "DEFAULT_SELECTED_SOURCES_UI",
     "DEFAULT_MODEL_NAME",
     "DEEPSEEK_DIRECT_MODEL_NAME",
-    "GEMINI_FALLBACK_MODEL_NAME",
+    "FALLBACK_MODEL_NAME",
     "BM25_INDEX_PATH",
     "DOCUMENT_DICT_PATH",
     "KB_AGENTS_PATH",
