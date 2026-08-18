@@ -117,7 +117,7 @@ The findings log is **"what did we learn"** — durable lessons about managing t
 
 ## 6. Dependencies
 
-If your experiment adds a dependency production doesn't need (e.g. a retriever you concluded not to adopt), put it in `[project.optional-dependencies]` and guard its tests with `pytest.importorskip`, so the prod image (`uv sync --locked`) stays lean. Example: the `graphrag` extra — reproduce with `uv sync --extra graphrag`.
+If your experiment adds a dependency production doesn't need (e.g. a retriever you concluded not to adopt), keep it out of `pyproject.toml`: document a manual `uv pip install ...` in the experiment's doc and guard its tests with `pytest.importorskip`, so the prod image (`uv sync --locked`) stays lean and the shared lockfile never inherits the experiment's version pins. Example: graphrag (whose litellm pins `openai<3`) — see the Setup section of `evals/graphrag.md`.
 
 ## 7. Merge back
 

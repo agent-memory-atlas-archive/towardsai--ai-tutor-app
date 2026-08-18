@@ -51,19 +51,25 @@ question). Both arms run on those 41 cases, both restricted to that source
 Measured course-content indexing rate: **~$88 / 1M corpus tokens** (vs ~$255 for
 dense API-reference docs). full_stack = 486k tokens -> **~$43** to index.
 
-## Setup (optional extra)
+## Setup (manual install)
 
-`graphrag` (and its `lancedb`/`litellm`/`pandas` deps) is an **eval-only optional
-extra** — it is imported lazily and only by the opt-in `graphrag` retriever, never
-on the production path, so it is kept out of the default install to keep the prod
-image lean. Install it to build/run this experiment:
+`graphrag` (and its `lancedb`/`litellm`/`pandas` deps) is deliberately **not in
+`pyproject.toml`**: its litellm dependency pins `openai<3`, which would cap the
+whole project's openai SDK, and the experiment is concluded (F28) so it does not
+justify permanent packaging. It is imported lazily and only by the opt-in
+`graphrag` retriever, never on the production path. To build/run this
+experiment, install it into your synced venv on the side:
 
 ```bash
-uv sync --extra graphrag
+uv pip install "graphrag>=3.1.0"
 ```
 
-A default `uv sync` (prod, CI) omits it; `tests/test_graph_rag.py` skips itself
-when the extra is absent.
+Two consequences of the manual install: it downgrades `openai` to 2.x inside
+your venv while graphrag is present (fine for the experiment; langchain-openai
+supports both), and any later `uv sync` prunes graphrag and restores openai v3
+(re-run the install command if you need it again). A default `uv sync` (prod,
+CI) never includes it; `tests/test_graph_rag.py` skips itself when graphrag is
+absent.
 
 ## Build the graph DB
 

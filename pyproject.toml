@@ -19,20 +19,15 @@ dependencies = [
     "langchain-openai",
     "nbconvert",
     "nbformat",
-    "openai",
+    # Not imported directly (langchain-openai is the consumer, and it supports
+    # 2.x and 3.x); the floor documents that this repo expects the v3 SDK.
+    "openai>=3",
     "pydantic",
     "python-dotenv",
     "requests",
     "tiktoken",
     "uvicorn",
 ]
-
-[project.optional-dependencies]
-# Eval-only: the GraphRAG-vs-RAG experiment (F28). Pulls graphrag + lancedb/litellm/
-# pandas, all imported lazily and only by the opt-in `graphrag` retriever — never on
-# the production path. Kept out of the default install so the Spaces image stays lean.
-# Reproduce the experiment with: uv sync --extra graphrag  (see evals/graphrag.md).
-graphrag = ["graphrag>=3.1.0"]
 
 [dependency-groups]
 dev = [
