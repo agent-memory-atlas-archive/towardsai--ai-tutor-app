@@ -41,6 +41,14 @@ from app.chat_service import (
 from app.chat_types import ChatRequest, ChatTurn, SourceMatch
 
 
+def _stub_chat_model():
+    # build_chat_model stand-in: SummarizationMiddleware reads model._llm_type and
+    # calls model.with_retry() at init (langchain >= 1.3.12).
+    model = types.SimpleNamespace(_llm_type="fake-chat-model")
+    model.with_retry = lambda **_kwargs: model
+    return model
+
+
 class FakeAgent:
     def __init__(self, messages, checkpoint_id="ckpt_latest"):
         self._messages = list(messages)
@@ -384,7 +392,7 @@ class ChatServiceTestCase(unittest.TestCase):
             with (
                 patch(
                     "app.chat_service.build_chat_model",
-                    return_value=types.SimpleNamespace(_llm_type="fake-chat-model"),
+                    return_value=_stub_chat_model(),
                 ),
                 patch("app.chat_service.build_system_prompt", return_value="prompt"),
                 patch("app.chat_service.create_agent", side_effect=fake_create_agent),
@@ -469,7 +477,7 @@ class ChatServiceTestCase(unittest.TestCase):
                     "app.chat_service.build_chat_model",
                     # SummarizationMiddleware reads model._llm_type at init, so the
                     # stub needs that attribute (a bare object() would AttributeError).
-                    return_value=types.SimpleNamespace(_llm_type="fake-chat-model"),
+                    return_value=_stub_chat_model(),
                 ),
                 patch("app.chat_service.build_system_prompt", return_value="prompt"),
                 patch("app.chat_service.create_agent", side_effect=fake_create_agent),
@@ -1621,7 +1629,7 @@ class ChatServiceTestCase(unittest.TestCase):
             with (
                 patch(
                     "app.chat_service.build_chat_model",
-                    return_value=types.SimpleNamespace(_llm_type="fake-chat-model"),
+                    return_value=_stub_chat_model(),
                 ),
                 patch("app.chat_service.create_agent", side_effect=fake_create_agent),
             ):

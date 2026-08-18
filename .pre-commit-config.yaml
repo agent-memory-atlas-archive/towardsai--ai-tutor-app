@@ -3,7 +3,7 @@
 # before a commit so you don't get a red CI run for formatting.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.15 # keep in sync with the ruff version in pyproject dev deps
+    rev: v0.16.3 # keep in sync with the ruff version in pyproject dev deps
     hooks:
       - id: ruff-check # lint
         args: [--fix]

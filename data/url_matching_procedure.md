@@ -175,13 +175,14 @@ surrounding keys and formatting are preserved. Print:
 
 ```python
 from collections import Counter
-counts = Counter(r['url'] for r in rows if r.get('url'))
+
+counts = Counter(r["url"] for r in rows if r.get("url"))
 dups = {u: n for u, n in counts.items() if n > 1}
 for url, n in dups.items():
-    print(f'{n}x {url}')
+    print(f"{n}x {url}")
     for r in rows:
-        if r.get('url') == url:
-            print(f'  - {r["name"]}')
+        if r.get("url") == url:
+            print(f"  - {r['name']}")
 ```
 
 For a well-authored pair of sources you'd expect every sidebar lesson to be
@@ -196,8 +197,8 @@ content that isn't shipped in this course anymore. If the file is meant to
 be course-scoped, drop those rows:
 
 ```python
-out = [l for l in open(JSONL_PATH) if json.loads(l).get('url')]
-open(JSONL_PATH, 'w').writelines(out)
+out = [l for l in open(JSONL_PATH) if json.loads(l).get("url")]
+open(JSONL_PATH, "w").writelines(out)
 ```
 
 ## Checklist

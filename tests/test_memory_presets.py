@@ -30,8 +30,11 @@ from langchain.agents.middleware import (
 
 
 def _stub_model():
-    # SummarizationMiddleware reads model._llm_type at init.
-    return types.SimpleNamespace(_llm_type="fake-chat-model")
+    # SummarizationMiddleware reads model._llm_type and calls model.with_retry()
+    # at init (langchain >= 1.3.12).
+    model = types.SimpleNamespace(_llm_type="fake-chat-model")
+    model.with_retry = lambda **_kwargs: model
+    return model
 
 
 class MemoryPresetResolutionTests(unittest.TestCase):

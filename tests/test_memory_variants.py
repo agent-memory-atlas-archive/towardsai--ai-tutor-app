@@ -352,6 +352,11 @@ class ExperimentCompactionMiddlewareTests(unittest.TestCase):
             self.bound.append(kwargs)
             return self
 
+        def with_retry(self, **kwargs):
+            # SummarizationMiddleware.__init__ wraps its model via Runnable.with_retry
+            # (langchain >= 1.3.12); the wrapper itself is unused by our subclass.
+            return self
+
         def invoke(self, prompt, config=None):
             self.prompts.append(prompt)
             return AIMessage(content=self.responses.pop(0))

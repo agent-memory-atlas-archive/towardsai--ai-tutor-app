@@ -1530,7 +1530,11 @@ class InstrumentedSummarizationMiddleware(SummarizationMiddleware):
         formatted = get_buffer_string(trimmed, format="xml")
         return self.summary_prompt.format(messages=formatted).rstrip()
 
-    def _summary_model(self, runtime: Any) -> Any:
+    # Not named `_summary_model`: upstream SummarizationMiddleware.__init__ assigns
+    # a `self._summary_model` retry-wrapper attribute (langchain >= 1.3.12), which
+    # would shadow a method of that name. Our before_model paths do their own
+    # retries, so we bind from `self.model` directly.
+    def _bound_summary_model(self, runtime: Any) -> Any:
         user_id = _cache_user_id_for_runtime(runtime)
         if not user_id:
             return self.model
@@ -1638,7 +1642,7 @@ class InstrumentedSummarizationMiddleware(SummarizationMiddleware):
         plan = self._plan_compaction(state)
         if plan is None:
             return None
-        model = self._summary_model(runtime)
+        model = self._bound_summary_model(runtime)
         prompt = self._summary_prompt_text(plan["trimmed"])
         retry_reasons: list[str] = []
         for attempt in range(1, self.MAX_SUMMARY_ATTEMPTS + 1):
@@ -1679,7 +1683,7 @@ class InstrumentedSummarizationMiddleware(SummarizationMiddleware):
         plan = self._plan_compaction(state)
         if plan is None:
             return None
-        model = self._summary_model(runtime)
+        model = self._bound_summary_model(runtime)
         prompt = self._summary_prompt_text(plan["trimmed"])
         retry_reasons: list[str] = []
         for attempt in range(1, self.MAX_SUMMARY_ATTEMPTS + 1):
