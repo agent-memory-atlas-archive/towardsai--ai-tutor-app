@@ -70,7 +70,14 @@ KB_AGENTS_PATH = f"{KB_DIR}/AGENTS.md"
 # In-git template, copied into data/kb/AGENTS.md by ensure_kb_agents_md().
 KB_AGENTS_TEMPLATE_PATH = "data/scraping_scripts/kb_agents_template.md"
 DEEPSEEK_DIRECT_MODEL_NAME = "deepseek:deepseek-v4-flash"
-DEFAULT_MODEL_NAME = DEEPSEEK_DIRECT_MODEL_NAME
+# DeepSeek V4 Flash via OpenRouter is the default chat path since 2026-08:
+# the first-party DeepSeek account is deliberately unfunded (its 402s
+# hard-failed prod for two days), and OpenRouter's cheap endpoints price a
+# typical agentic turn well below first-party rates anyway. OpenRouter serves
+# this model only through third-party hosts, so DeepSeek's ~31x first-party
+# cache-hit discount does NOT apply there; see MODEL_PRICING in app/telemetry.
+OPENROUTER_DEEPSEEK_MODEL_NAME = "openrouter:deepseek/deepseek-v4-flash"
+DEFAULT_MODEL_NAME = OPENROUTER_DEEPSEEK_MODEL_NAME
 
 # Two distinct roles, deliberately kept apart:
 #
@@ -96,7 +103,7 @@ FALLBACK_MODEL_NAME = "google-genai:gemini-3.5-flash-lite"
 
 AVAILABLE_MODELS: tuple[dict[str, str], ...] = (
     {
-        "id": DEEPSEEK_DIRECT_MODEL_NAME,
+        "id": OPENROUTER_DEEPSEEK_MODEL_NAME,
         "label": "DeepSeek V4 Flash",
     },
 )
@@ -294,6 +301,7 @@ __all__ = [
     "DEFAULT_MODEL_NAME",
     "DEEPSEEK_DIRECT_MODEL_NAME",
     "FALLBACK_MODEL_NAME",
+    "OPENROUTER_DEEPSEEK_MODEL_NAME",
     "BM25_INDEX_PATH",
     "DOCUMENT_DICT_PATH",
     "KB_AGENTS_PATH",

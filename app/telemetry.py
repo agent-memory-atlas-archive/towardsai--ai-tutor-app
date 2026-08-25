@@ -256,11 +256,18 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     "gpt-5.6-luna": ModelPricing(
         input=0.20, output=1.20, cache_read=0.02, cache_write=0.25
     ),
-    # DeepSeek-V4-Flash via OpenRouter (slug "deepseek/deepseek-v4-flash").
-    # Kept for the openrouter provider path; unused now that evals run on the
-    # first-party API. Note OpenRouter's own list price differs ($0.09/$0.18).
+    # DeepSeek-V4-Flash via OpenRouter (slug "deepseek/deepseek-v4-flash") --
+    # the DEFAULT chat path since 2026-08. OpenRouter routes across ~17
+    # third-party hosts whose prices vary widely (input $0.068-$0.44, output
+    # $0.168-$1.32 per 1M); default routing favors the cheap end, so this row
+    # stores the headline (cheapest-endpoint) rate and expensive-host turns
+    # are underestimated. Caching is implicit with no write surcharge; cache
+    # reads bill at the endpoint's own rate (~0.25x its input price), NOT
+    # DeepSeek first-party's ~31x discount -- DeepSeek does not serve this
+    # model on OpenRouter. Checked 2026-08-25 against
+    # openrouter.ai/api/v1/models/deepseek/deepseek-v4-flash/endpoints.
     "deepseek/deepseek-v4-flash": ModelPricing(
-        input=0.14, output=0.28, cache_read=0.0028
+        input=0.0679, output=0.168, cache_read=0.0168
     ),
     # DeepSeek-V4-Flash, DeepSeek FIRST-PARTY API (base https://api.deepseek.com,
     # model id "deepseek-v4-flash" — the id the API echoes back, so this is the

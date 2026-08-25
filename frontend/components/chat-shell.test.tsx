@@ -151,7 +151,7 @@ vi.mock("@/components/chat-message", () => ({
 
 import { ChatShell } from "@/components/chat-shell";
 
-const DEFAULT_MODEL = "deepseek:deepseek-v4-flash";
+const DEFAULT_MODEL = "openrouter:deepseek/deepseek-v4-flash";
 const CLAUDE_MODEL = "anthropic:claude-haiku-4-5";
 
 const toolsResponse = {

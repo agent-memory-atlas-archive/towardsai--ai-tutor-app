@@ -11,11 +11,14 @@ import pytest
 from app import config
 
 
-def test_default_chat_model_prefers_deepseek_direct_with_gemini_fallback() -> None:
-    assert config.DEFAULT_MODEL_NAME == config.DEEPSEEK_DIRECT_MODEL_NAME
-    assert config.DEFAULT_MODEL_NAME == "deepseek:deepseek-v4-flash"
+def test_default_chat_model_is_openrouter_deepseek_with_gemini_fallback() -> None:
+    assert config.DEFAULT_MODEL_NAME == config.OPENROUTER_DEEPSEEK_MODEL_NAME
+    assert config.DEFAULT_MODEL_NAME == "openrouter:deepseek/deepseek-v4-flash"
     assert config.FALLBACK_MODEL_NAME == "google-genai:gemini-3.5-flash-lite"
     assert config.AVAILABLE_MODELS[0]["id"] == config.DEFAULT_MODEL_NAME
+    # The retired first-party path stays addressable for experiments but is
+    # neither the default nor selectable.
+    assert config.DEEPSEEK_DIRECT_MODEL_NAME == "deepseek:deepseek-v4-flash"
 
 
 def test_gemini_fallback_model_is_deliberately_not_selectable() -> None:
@@ -25,12 +28,12 @@ def test_gemini_fallback_model_is_deliberately_not_selectable() -> None:
     our custom tools) this is a product choice, one selectable model plus a
     rescue path, rather than the hard API constraint it was for 2.5-flash. The
     fallback still never receives web tools: build_agent binds them from the
-    requested model (DeepSeek), which has none.
+    requested model (DeepSeek via OpenRouter), which has none.
     """
     selectable = [model["id"] for model in config.AVAILABLE_MODELS]
 
     assert config.FALLBACK_MODEL_NAME not in selectable
-    assert selectable == ["deepseek:deepseek-v4-flash"]
+    assert selectable == ["openrouter:deepseek/deepseek-v4-flash"]
 
 
 def _patched_bundle(tmp_path: Path) -> ExitStack:

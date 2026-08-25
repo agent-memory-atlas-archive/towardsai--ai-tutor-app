@@ -44,6 +44,7 @@ from .agent_tracing import langsmith_deployment_identity
 from .chat_types import ChatEvent, ChatRequest, ChatTurn, SourceMatch
 from .alerts import send_ops_alert
 from .deepseek_chat import TutorChatDeepSeek
+from .openrouter_chat import TutorChatOpenRouter
 from .memory_presets import (
     MemoryConfig,
     resolve_memory_preset,
@@ -960,6 +961,12 @@ def is_deepseek_model(model_name: str) -> bool:
     return provider == "deepseek"
 
 
+def is_openrouter_model(model_name: str) -> bool:
+    provider_model = normalize_model_name(model_name)
+    provider, _, _actual_model = provider_model.partition(":")
+    return provider == "openrouter"
+
+
 def supports_gemini_tool_combination(model_name: str) -> bool:
     """True when a Gemini model can mix built-in tools with function tools.
 
@@ -1032,12 +1039,17 @@ def _build_chat_model_client(provider_model: str, include_thoughts: bool = False
         # Routing inside OpenRouter is left with its own fallbacks enabled:
         # pinning a single provider with allow_fallbacks=False made batches die
         # on a backend's transient 429 instead of routing around it.
-        return ChatOpenAI(
+        # ``reasoning`` is OpenRouter's model-agnostic thinking toggle; sending
+        # it explicitly (rather than omitting it) pins the behavior across the
+        # gateway's per-host defaults, and the adapter preserves the streamed
+        # thought text that plain ChatOpenAI would discard.
+        return TutorChatOpenRouter(
             model=actual_model,
             temperature=1,
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ.get("OPENROUTER_API_KEY"),
             stream_usage=True,
+            extra_body={"reasoning": {"enabled": bool(include_thoughts)}},
             # Long agentic sessions fire hundreds of calls against OpenRouter's
             # shared pool; bump retries (with the client's exponential backoff)
             # to ride out transient upstream 429s instead of failing a whole
@@ -2876,6 +2888,9 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatEvent]:
             is_google_genai_model(serving_model_name)
             or is_anthropic_model(serving_model_name)
             or is_deepseek_model(serving_model_name)
+            # OpenRouter's unified `reasoning` request field works across the
+            # models it routes; hosts that don't support it ignore it.
+            or is_openrouter_model(serving_model_name)
         )
         # Gemini streams each thought summary as one complete block; Anthropic
         # streams partial fragments of a single thought. The encoder uses this

@@ -8,8 +8,14 @@ from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from app.config import DEEPSEEK_DIRECT_MODEL_NAME, FALLBACK_MODEL_NAME
+from app.config import (
+    DEEPSEEK_DIRECT_MODEL_NAME,
+    DEFAULT_MODEL_NAME,
+    FALLBACK_MODEL_NAME,
+    OPENROUTER_DEEPSEEK_MODEL_NAME,
+)
 from app.deepseek_chat import TutorChatDeepSeek
+from app.openrouter_chat import TutorChatOpenRouter
 from app.chat_service import (
     THREAD_IDLE_TTL_SECONDS,
     _claim_kb_command_budget,
@@ -602,6 +608,50 @@ class ChatServiceTestCase(unittest.TestCase):
             {"thinking": {"type": "enabled"}},
         )
 
+    def test_openrouter_model_uses_adapter_with_explicit_reasoning_toggle(
+        self,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPENROUTER_API_KEY": "openrouter-test-key"},
+            clear=True,
+        ):
+            plain = build_chat_model(OPENROUTER_DEEPSEEK_MODEL_NAME)
+            thinking = build_chat_model(
+                OPENROUTER_DEEPSEEK_MODEL_NAME, include_thoughts=True
+            )
+
+        self.assertIsInstance(plain, TutorChatOpenRouter)
+        self.assertEqual(plain.model_name, "deepseek/deepseek-v4-flash")
+        self.assertEqual(plain.extra_body, {"reasoning": {"enabled": False}})
+        self.assertEqual(thinking.extra_body, {"reasoning": {"enabled": True}})
+
+    def test_openrouter_stream_preserves_reasoning_deltas(self) -> None:
+        model = TutorChatOpenRouter(
+            model="deepseek/deepseek-v4-flash",
+            api_key="openrouter-test-key",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        # The delta shape OpenRouter actually streams (verified live
+        # 2026-08-25): thought text arrives in `reasoning`, not DeepSeek's
+        # `reasoning_content`.
+        chunk = {
+            "id": "gen-1",
+            "model": "deepseek/deepseek-v4-flash",
+            "choices": [
+                {"index": 0, "delta": {"content": "", "reasoning": "We compute "}}
+            ],
+        }
+
+        generation_chunk = model._convert_chunk_to_generation_chunk(
+            chunk, AIMessageChunk, None
+        )
+
+        self.assertEqual(
+            generation_chunk.message.additional_kwargs["reasoning_content"],
+            "We compute ",
+        )
+
     def test_deepseek_thinking_tool_call_replays_reasoning_content(self) -> None:
         model = TutorChatDeepSeek(
             model="deepseek-v4-flash",
@@ -641,7 +691,7 @@ class ChatServiceTestCase(unittest.TestCase):
             {"GEMINI_API_KEY": "gemini-test-key"},
             clear=True,
         ):
-            served = resolve_served_model_name(DEEPSEEK_DIRECT_MODEL_NAME)
+            served = resolve_served_model_name(DEFAULT_MODEL_NAME)
             model = build_chat_model(served)
 
         self.assertEqual(served, FALLBACK_MODEL_NAME)
@@ -650,33 +700,33 @@ class ChatServiceTestCase(unittest.TestCase):
     def test_resolve_served_model_name_keeps_default_when_key_present(self) -> None:
         with patch.dict(
             os.environ,
-            {"DEEPSEEK_API_KEY": "deepseek-test-key"},
+            {"OPENROUTER_API_KEY": "openrouter-test-key"},
             clear=True,
         ):
             self.assertEqual(
-                resolve_served_model_name(DEEPSEEK_DIRECT_MODEL_NAME),
-                DEEPSEEK_DIRECT_MODEL_NAME,
+                resolve_served_model_name(DEFAULT_MODEL_NAME),
+                DEFAULT_MODEL_NAME,
             )
 
     def test_rescue_model_covers_only_the_default_model(self) -> None:
         with patch.dict(
             os.environ,
             {
-                "DEEPSEEK_API_KEY": "deepseek-test-key",
+                "OPENROUTER_API_KEY": "openrouter-test-key",
                 "GEMINI_API_KEY": "gemini-test-key",
             },
             clear=True,
         ):
-            self.assertEqual(
-                rescue_model_for(DEEPSEEK_DIRECT_MODEL_NAME), FALLBACK_MODEL_NAME
-            )
-            # A deliberately selected non-default model must fail visibly.
+            self.assertEqual(rescue_model_for(DEFAULT_MODEL_NAME), FALLBACK_MODEL_NAME)
+            # A deliberately selected non-default model must fail visibly --
+            # including the retired first-party DeepSeek path.
             self.assertIsNone(rescue_model_for("anthropic:claude-haiku-4-5"))
+            self.assertIsNone(rescue_model_for(DEEPSEEK_DIRECT_MODEL_NAME))
         with patch.dict(
-            os.environ, {"DEEPSEEK_API_KEY": "deepseek-test-key"}, clear=True
+            os.environ, {"OPENROUTER_API_KEY": "openrouter-test-key"}, clear=True
         ):
             # No fallback key, no rescue.
-            self.assertIsNone(rescue_model_for(DEEPSEEK_DIRECT_MODEL_NAME))
+            self.assertIsNone(rescue_model_for(DEFAULT_MODEL_NAME))
 
     def test_provider_outage_classification(self) -> None:
         class ServerError(Exception):
@@ -1031,7 +1081,7 @@ class ChatServiceTestCase(unittest.TestCase):
         request = ChatRequest(
             query="ls the kb",
             source_keys=("peft",),
-            model_name=DEEPSEEK_DIRECT_MODEL_NAME,
+            model_name=DEFAULT_MODEL_NAME,
             include_reasoning=False,
             enabled_tools=(),
         )
@@ -1042,7 +1092,7 @@ class ChatServiceTestCase(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"DEEPSEEK_API_KEY": "k1", "GEMINI_API_KEY": "k2"},
+                {"OPENROUTER_API_KEY": "k1", "GEMINI_API_KEY": "k2"},
                 clear=False,
             ),
             patch("app.chat_service.build_agent", side_effect=fake_build_agent),
@@ -1051,9 +1101,7 @@ class ChatServiceTestCase(unittest.TestCase):
             events = asyncio.run(collect_events())
 
         # The turn restarted on the fallback model and completed normally.
-        self.assertEqual(
-            built_models, [DEEPSEEK_DIRECT_MODEL_NAME, FALLBACK_MODEL_NAME]
-        )
+        self.assertEqual(built_models, [DEFAULT_MODEL_NAME, FALLBACK_MODEL_NAME])
         types = [event.type for event in events]
         self.assertIn("thread_started", types)
         self.assertIn("context_stats", types)
@@ -1075,7 +1123,7 @@ class ChatServiceTestCase(unittest.TestCase):
         request = ChatRequest(
             query="ls the kb",
             source_keys=("peft",),
-            model_name=DEEPSEEK_DIRECT_MODEL_NAME,
+            model_name=DEFAULT_MODEL_NAME,
             include_reasoning=False,
             enabled_tools=(),
         )
@@ -1086,7 +1134,7 @@ class ChatServiceTestCase(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"DEEPSEEK_API_KEY": "k1", "GEMINI_API_KEY": "k2"},
+                {"OPENROUTER_API_KEY": "k1", "GEMINI_API_KEY": "k2"},
                 clear=False,
             ),
             patch("app.chat_service.build_agent", side_effect=fake_build_agent),
@@ -1099,14 +1147,12 @@ class ChatServiceTestCase(unittest.TestCase):
             events = asyncio.run(collect_events())
 
         # The unfunded account rescued onto the fallback model and paged ops.
-        self.assertEqual(
-            built_models, [DEEPSEEK_DIRECT_MODEL_NAME, FALLBACK_MODEL_NAME]
-        )
+        self.assertEqual(built_models, [DEFAULT_MODEL_NAME, FALLBACK_MODEL_NAME])
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0][0], "account-state")
         self.assertIn("Insufficient Balance", alerts[0][1])
         stats = next(event for event in events if event.type == "context_stats")
-        self.assertEqual(stats.data["requested_model"], DEEPSEEK_DIRECT_MODEL_NAME)
+        self.assertEqual(stats.data["requested_model"], DEFAULT_MODEL_NAME)
         self.assertEqual(stats.data["served_model"], FALLBACK_MODEL_NAME)
         self.assertTrue(stats.data["rescued"])
 
@@ -1125,7 +1171,7 @@ class ChatServiceTestCase(unittest.TestCase):
         request = ChatRequest(
             query="ls the kb",
             source_keys=("peft",),
-            model_name=DEEPSEEK_DIRECT_MODEL_NAME,
+            model_name=DEFAULT_MODEL_NAME,
             include_reasoning=False,
             enabled_tools=(),
         )
@@ -1136,7 +1182,7 @@ class ChatServiceTestCase(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"DEEPSEEK_API_KEY": "k1", "GEMINI_API_KEY": "k2"},
+                {"OPENROUTER_API_KEY": "k1", "GEMINI_API_KEY": "k2"},
                 clear=False,
             ),
             patch("app.chat_service.build_agent", side_effect=fake_build_agent),
@@ -1146,7 +1192,7 @@ class ChatServiceTestCase(unittest.TestCase):
                 asyncio.run(collect_events())
 
         # 4xx never reaches the fallback; the primary was the only attempt.
-        self.assertEqual(built_models, [DEEPSEEK_DIRECT_MODEL_NAME])
+        self.assertEqual(built_models, [DEFAULT_MODEL_NAME])
 
     def test_stream_chat_emits_deepseek_reasoning_content(self) -> None:
         agent = FakeDeepSeekReasoningAgent([])
@@ -1155,7 +1201,7 @@ class ChatServiceTestCase(unittest.TestCase):
         request = ChatRequest(
             query="Find the course repository",
             source_keys=("peft",),
-            model_name=DEEPSEEK_DIRECT_MODEL_NAME,
+            model_name=DEFAULT_MODEL_NAME,
             include_reasoning=True,
             enabled_tools=(),
         )
@@ -1188,7 +1234,7 @@ class ChatServiceTestCase(unittest.TestCase):
         request = ChatRequest(
             query="Where should I store API keys?",
             source_keys=("langchain",),
-            model_name=DEEPSEEK_DIRECT_MODEL_NAME,
+            model_name=DEFAULT_MODEL_NAME,
             include_reasoning=False,
             enabled_tools=(),
         )

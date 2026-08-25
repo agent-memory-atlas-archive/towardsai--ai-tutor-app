@@ -357,7 +357,13 @@ MEMORY_PRESETS: dict[str, MemoryConfig] = {
 # example, has a 200k input window and cannot safely wait for an 800k trigger).
 PRODUCTION_MEMORY_PRESET = "prod_v2"
 PRODUCTION_FALLBACK_MEMORY_PRESET = "prod"
-PRODUCTION_LONG_CONTEXT_PROVIDERS = frozenset({"deepseek", "google-genai"})
+# "openrouter" is here for the default DeepSeek-via-OpenRouter chat model.
+# The gate is provider-granular, so any openrouter:* model resolves to the
+# long-context production preset by default; eval runs pin presets by name,
+# so in practice this only decides the served chat path.
+PRODUCTION_LONG_CONTEXT_PROVIDERS = frozenset(
+    {"deepseek", "google-genai", "openrouter"}
+)
 
 # Backward-compatible import for callers that need a single default name. New
 # runtime code should call resolve_memory_preset(..., model_name=...) so model

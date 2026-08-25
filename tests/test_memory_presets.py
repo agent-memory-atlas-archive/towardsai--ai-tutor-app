@@ -90,10 +90,23 @@ class MemoryPresetResolutionTests(unittest.TestCase):
                 production_memory_preset_name("openai:gpt-5.6"),
                 PRODUCTION_FALLBACK_MEMORY_PRESET,
             )
+            self.assertEqual(
+                resolve_memory_preset(
+                    None, model_name="openrouter:deepseek/deepseek-v4-flash"
+                ).name,
+                "prod_v2",
+            )
 
     def test_prod_v2_rejects_short_context_providers(self) -> None:
         self.assertTrue(
             memory_preset_supports_model("prod_v2", "deepseek:deepseek-v4-flash")
+        )
+        # The default chat path serves DeepSeek through OpenRouter; prod_v2
+        # must not silently downgrade it to the legacy preset.
+        self.assertTrue(
+            memory_preset_supports_model(
+                "prod_v2", "openrouter:deepseek/deepseek-v4-flash"
+            )
         )
         self.assertTrue(
             memory_preset_supports_model(
