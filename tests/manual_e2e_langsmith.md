@@ -22,7 +22,10 @@ Required local artifacts and environment:
 - `data/kb/wiki/index.md` exists
 - `curl` and `jq` are on `PATH`, and the standalone `langsmith` CLI binary is
   installed (a separate Go binary, e.g. `~/.local/bin/langsmith`; `uv sync`
-  does not provide it — `uv run` merely inherits it via `PATH`)
+  does not provide it — `uv run` merely inherits it via `PATH`). Keep it
+  current with `langsmith self-update`: old builds call since-removed
+  LangSmith API endpoints (e.g. v0.2.32 still used `POST /api/v1/runs/query`,
+  removed 2027-01-31), which shows up as a deprecation banner on the platform.
 
 Quick check:
 
