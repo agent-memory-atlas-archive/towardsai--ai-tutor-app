@@ -616,6 +616,11 @@ class UIMessageStreamEncoder:
                     "data": {
                         "messageId": str(data.get("message_id", "")),
                         "memoryPreset": str(data.get("memory_preset", "")),
+                        # servedModel != requestedModel when the fallback
+                        # model answered (key substitution or turn rescue).
+                        "requestedModel": str(data.get("requested_model", "")),
+                        "servedModel": str(data.get("served_model", "")),
+                        "rescued": bool(data.get("rescued", False)),
                         "llmCalls": data.get("llm_calls"),
                         "inputTokens": data.get("input_tokens"),
                         "outputTokens": data.get("output_tokens"),

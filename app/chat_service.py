@@ -42,6 +42,7 @@ from langgraph.types import Command
 
 from .agent_tracing import langsmith_deployment_identity
 from .chat_types import ChatEvent, ChatRequest, ChatTurn, SourceMatch
+from .alerts import send_ops_alert
 from .deepseek_chat import TutorChatDeepSeek
 from .memory_presets import (
     MemoryConfig,
@@ -1166,20 +1167,32 @@ def rescue_model_for(serving_model: str) -> str | None:
     return fallback
 
 
-def is_provider_outage_error(exc: BaseException) -> bool:
-    """Outage-class errors: connectivity, timeouts, 429, and 5xx.
-
-    4xx request errors are OUR bugs; they must surface, never be laundered
-    through a fallback model. Shared by the turn-level rescue in stream_chat
-    and the summarization middleware's in-process retries.
-    """
-    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
-        return True
+def _exception_status_code(exc: BaseException) -> int | None:
     status = getattr(exc, "status_code", None)
     if status is None:
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None)
-    if isinstance(status, int):
+    return status if isinstance(status, int) else None
+
+
+def is_provider_outage_error(exc: BaseException) -> bool:
+    """Outage-class errors: connectivity, timeouts, 429, and 5xx.
+
+    Transient by nature, so retrying can help -- on the same provider (the
+    summarization middleware's in-process retries) or on another one (the
+    turn-level rescue in stream_chat). Two 4xx families are deliberately NOT
+    here, for different reasons:
+
+    - Request errors (400/404/422...): OUR bugs. They must surface, never be
+      laundered through a retry or a fallback model.
+    - Account-state errors (401/402/403): not our bugs, but not transient
+      either -- see is_account_state_error. A same-provider retry is
+      pointless; only the cross-provider rescue treats them as rescuable.
+    """
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
+        return True
+    status = _exception_status_code(exc)
+    if status is not None:
         return status in {408, 409, 425, 429} or status >= 500
     return type(exc).__name__ in {
         "APIConnectionError",
@@ -1187,6 +1200,24 @@ def is_provider_outage_error(exc: BaseException) -> bool:
         "InternalServerError",
         "RateLimitError",
     }
+
+
+def is_account_state_error(exc: BaseException) -> bool:
+    """Account-state errors: the provider refused OUR ACCOUNT, not the request.
+
+    402 (insufficient balance) plus 401/403 (revoked or unauthorized key).
+    The request is well-formed; the account is unusable until a human tops up
+    or rotates a key, so these never self-heal and never benefit from a
+    same-provider retry. The turn-level rescue in stream_chat treats them
+    like outages (another provider's account is independent), and they always
+    page ops via app/alerts.py. Born from a real incident: a DeepSeek 402
+    "Insufficient Balance" hard-failed every prod turn for two days because
+    the old classification lumped all 4xx together as request bugs.
+    """
+    status = _exception_status_code(exc)
+    if status is not None:
+        return status in {401, 402, 403}
+    return type(exc).__name__ in {"AuthenticationError", "PermissionDeniedError"}
 
 
 def build_chat_model(model_name: str, include_thoughts: bool = False):
@@ -2933,7 +2964,24 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatEvent]:
             rescue_model = (
                 None if rescue_attempted else rescue_model_for(serving_model_name)
             )
-            if rescue_model is None or not is_provider_outage_error(exc):
+            account_state = is_account_state_error(exc)
+            rescuable = account_state or is_provider_outage_error(exc)
+            if rescuable:
+                # Provider incidents page ops whether or not a rescue exists:
+                # a rescued turn is an invisible success otherwise, and an
+                # account-state error (unfunded/revoked key) never self-heals.
+                rescue_note = (
+                    f"rescuing the turn on {rescue_model}"
+                    if rescue_model is not None
+                    else "no rescue model available; the turn failed"
+                )
+                await asyncio.to_thread(
+                    send_ops_alert,
+                    "account-state" if account_state else "provider-outage",
+                    f"{serving_model_name} failed before its first chunk "
+                    f"({type(exc).__name__}: {exc}); {rescue_note}.",
+                )
+            if rescue_model is None or not rescuable:
                 # Mirror the stream finally below for a turn that died before
                 # its first chunk, so the client's next request still matches
                 # this thread.
@@ -3323,6 +3371,12 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatEvent]:
             "message_id": message_id,
             "thread_id": active_thread_id,
             "memory_preset": memory_config.name,
+            # Which model actually answered. served != requested when the key
+            # substitution or the turn-level rescue redirected the turn; the
+            # rescued flag isolates the latter (a provider incident mid-turn).
+            "requested_model": normalize_model_name(request.model_name),
+            "served_model": serving_model_name,
+            "rescued": rescue_attempted,
             "llm_calls": usage_handler.llm_calls,
             # Per-model breakdown for trace bundles; the totals below are
             # what the UI meter renders.

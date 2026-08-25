@@ -35,6 +35,7 @@ from app.chat_service import (
     run_kb_command,
     supports_gemini_tool_combination,
     sync_thread_with_history,
+    is_account_state_error,
     is_provider_outage_error,
     rescue_model_for,
     resolve_served_model_name,
@@ -695,6 +696,28 @@ class ChatServiceTestCase(unittest.TestCase):
         self.assertFalse(is_provider_outage_error(BadRequest()))
         self.assertFalse(is_provider_outage_error(ValueError("boom")))
 
+    def test_account_state_classification(self) -> None:
+        class InsufficientBalance(Exception):
+            status_code = 402
+
+        class Unauthorized(Exception):
+            status_code = 401
+
+        class Forbidden(Exception):
+            status_code = 403
+
+        class BadRequest(Exception):
+            status_code = 400
+
+        for exc in (InsufficientBalance(), Unauthorized(), Forbidden()):
+            self.assertTrue(is_account_state_error(exc))
+            # Account-state errors are not outages: the summarization
+            # middleware's same-provider retries must not pick them up.
+            self.assertFalse(is_provider_outage_error(exc))
+        self.assertFalse(is_account_state_error(BadRequest()))
+        self.assertFalse(is_account_state_error(TimeoutError()))
+        self.assertFalse(is_account_state_error(ValueError("boom")))
+
     def test_kb_command_budget_blocks_after_limit(self) -> None:
         session_id = "test_budget_session"
         _clear_kb_command_budget(session_id)
@@ -1034,6 +1057,58 @@ class ChatServiceTestCase(unittest.TestCase):
         types = [event.type for event in events]
         self.assertIn("thread_started", types)
         self.assertIn("context_stats", types)
+
+    def test_stream_chat_rescues_account_state_errors_and_alerts(self) -> None:
+        class InsufficientBalance(Exception):
+            status_code = 402
+
+        primary = FakeErrorAgent([], InsufficientBalance("Insufficient Balance"))
+        fallback_agent = FakeToolThenTextAgent([])
+        built_models: list[str] = []
+        alerts: list[tuple[str, str]] = []
+
+        def fake_build_agent(model_name, **kwargs):
+            built_models.append(model_name)
+            return primary if len(built_models) == 1 else fallback_agent
+
+        self.addCleanup(_drop_thread_record, "thread_402_rescue")
+        request = ChatRequest(
+            query="ls the kb",
+            source_keys=("peft",),
+            model_name=DEEPSEEK_DIRECT_MODEL_NAME,
+            include_reasoning=False,
+            enabled_tools=(),
+        )
+
+        async def collect_events():
+            return [event async for event in stream_chat(request)]
+
+        with (
+            patch.dict(
+                os.environ,
+                {"DEEPSEEK_API_KEY": "k1", "GEMINI_API_KEY": "k2"},
+                clear=False,
+            ),
+            patch("app.chat_service.build_agent", side_effect=fake_build_agent),
+            patch("app.chat_service.new_thread_id", return_value="thread_402_rescue"),
+            patch(
+                "app.chat_service.send_ops_alert",
+                side_effect=lambda kind, text: alerts.append((kind, text)) or True,
+            ),
+        ):
+            events = asyncio.run(collect_events())
+
+        # The unfunded account rescued onto the fallback model and paged ops.
+        self.assertEqual(
+            built_models, [DEEPSEEK_DIRECT_MODEL_NAME, FALLBACK_MODEL_NAME]
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0][0], "account-state")
+        self.assertIn("Insufficient Balance", alerts[0][1])
+        stats = next(event for event in events if event.type == "context_stats")
+        self.assertEqual(stats.data["requested_model"], DEEPSEEK_DIRECT_MODEL_NAME)
+        self.assertEqual(stats.data["served_model"], FALLBACK_MODEL_NAME)
+        self.assertTrue(stats.data["rescued"])
 
     def test_stream_chat_does_not_rescue_request_errors(self) -> None:
         class BadRequest(Exception):
