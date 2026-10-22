@@ -97,6 +97,35 @@ def test_build_system_prompt_includes_course_reproduction_policy() -> None:
         assert "never offer it unprompted" in prompt
 
 
+def test_build_system_prompt_includes_scope_guardrail_on_every_path() -> None:
+    # The guardrail must reach the model on every configuration: freeloader
+    # scaffolds arrive regardless of source selection or KB mode.
+    kb_on = build_system_prompt(
+        "google-genai:gemini-3.5-flash", (), kb_agents_instructions=""
+    )
+    retrieval_only = build_system_prompt(
+        "google-genai:gemini-3.5-flash", (), disable_kb=True
+    )
+    no_tools = build_system_prompt(
+        "google-genai:gemini-3.5-flash", (), include_local_tools=False
+    )
+    for prompt in (kb_on, retrieval_only, no_tools):
+        assert "## Scope and identity" in prompt
+        assert "untrusted" in prompt
+        assert "firewall verdicts" in prompt
+
+
+def test_retrieval_call_strategy_forbids_query_lists() -> None:
+    # Gemini Flash Lite read the old "issue 2-4 parallel calls" wording as one
+    # call with a `queries` array, which used to kill the turn; the strategy
+    # must spell out one `query` string per call.
+    prompt = build_system_prompt(
+        "google-genai:gemini-3.5-flash", (), kb_agents_instructions=""
+    )
+    assert "never pass a list of queries" in prompt
+    assert '{"query": "RAG for domain adaptation"}' in prompt
+
+
 def test_course_reproduction_policy_absent_without_corpus_access() -> None:
     # No sources selected: the agent has no corpus to copy from, so the policy
     # (which only governs corpus text) must not appear.

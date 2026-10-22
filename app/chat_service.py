@@ -369,9 +369,30 @@ RETRIEVE_TUTOR_CONTEXT_SCHEMA = {
 
 @tool(args_schema=RETRIEVE_TUTOR_CONTEXT_SCHEMA)
 def retrieve_tutor_context(
-    query: str, runtime: ToolRuntime[AppContext], **unsupported: Any
+    query: str | None = None,
+    runtime: ToolRuntime[AppContext] | None = None,
+    **unsupported: Any,
 ) -> str:
     """Retrieve relevant course and documentation context for an AI tutor question."""
+    # A dict args_schema is not validated by langchain-core, so a call that
+    # omits `query` reaches Python's call binding directly; without a default
+    # it raised an uncaught TypeError that killed the whole turn (seen in prod
+    # when Gemini Flash Lite batched `{"queries": [...]}` into one call). The
+    # default moves that case here, where the model gets a corrective tool
+    # message and can retry.
+    if not isinstance(query, str) or not query.strip():
+        received = ", ".join(sorted(unsupported)) or (
+            "no usable arguments" if query is None else "an invalid `query` value"
+        )
+        logger.warning(
+            "retrieve_tutor_context called without a query; received: %s", received
+        )
+        return (
+            "retrieve_tutor_context could not run: it takes exactly one `query` "
+            f"string, but received {received}. To search several angles, issue "
+            "separate parallel retrieve_tutor_context calls, each with its own "
+            "single `query` string."
+        )
     if unsupported:
         names = ", ".join(sorted(unsupported))
         logger.warning(
@@ -453,14 +474,27 @@ RUN_KB_COMMAND_SCHEMA = {
 
 @tool(args_schema=RUN_KB_COMMAND_SCHEMA)
 def run_kb_command(
-    command: str,
-    runtime: ToolRuntime[AppContext],
+    command: str | None = None,
+    runtime: ToolRuntime[AppContext] | None = None,
     timeout_seconds: int | None = None,
     max_output_chars: int = 40000,
     timeout: int | None = None,
     **unsupported: Any,
 ) -> str:
     """Run a safe, read-only terminal-style command inside the local KB."""
+    # Same soft landing as retrieve_tutor_context: the dict args_schema is not
+    # validated, so a call without `command` must not raise out of the tool.
+    if not isinstance(command, str) or not command.strip():
+        received = ", ".join(sorted(unsupported)) or (
+            "no usable arguments" if command is None else "an invalid `command` value"
+        )
+        logger.warning(
+            "run_kb_command called without a command; received: %s", received
+        )
+        return (
+            "error: run_kb_command takes exactly one `command` string, but "
+            f"received {received}. Retry with a single read-only command string."
+        )
     if unsupported:
         names = ", ".join(sorted(unsupported))
         logger.warning("run_kb_command received unsupported arguments: %s", names)

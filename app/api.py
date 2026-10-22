@@ -3,14 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -53,6 +57,115 @@ MAX_HISTORY_TURNS = 100
 MAX_CLIENT_MESSAGES = 100
 MAX_MESSAGE_JSON_CHARS = 200_000
 MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+# Abuse guards. The Space is public and unauthenticated, and scripted
+# freeloaders have wired /api/chat up as the backend LLM of their own products
+# (LangSmith traces show automated jobs pasting a full replacement "system
+# prompt" plus a completion-style "User: ... Assistant:" scaffold into the
+# user message). Two narrow, cheap defenses:
+#
+# 1. Reject requests carrying a marker seen in real freeloader traffic, or
+#    ending with a completion-style "Assistant:" cue. Students don't write
+#    either; API wrappers asking the model to continue a transcript do.
+# 2. A per-client sliding-window rate limit, so a scripted client can't scale
+#    into a real provider bill. The default budget is far above a human's pace
+#    and tolerant of a classroom behind one NAT IP.
+BLOCKED_QUERY_MARKERS = ("govibe",)
+RATE_LIMIT_MAX_REQUESTS_ENV = "AI_TUTOR_RATE_LIMIT_MAX_REQUESTS"
+RATE_LIMIT_WINDOW_SECONDS_ENV = "AI_TUTOR_RATE_LIMIT_WINDOW_SECONDS"
+DEFAULT_RATE_LIMIT_MAX_REQUESTS = 30
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 300.0
+
+
+def find_abuse_marker(query: str, history: tuple[ChatTurn, ...]) -> str | None:
+    """Return a short internal label when the request matches known freeloader
+    traffic, None otherwise. Matching is deliberately narrow (observed abuse
+    only), so a false positive on a real student question is implausible."""
+    for text in (query, *(turn.content for turn in history)):
+        lowered = text.lower()
+        for marker in BLOCKED_QUERY_MARKERS:
+            if marker in lowered:
+                return f"marker:{marker}"
+    if query.rstrip().endswith("Assistant:"):
+        return "completion-scaffold"
+    return None
+
+
+class SlidingWindowRateLimiter:
+    """In-process sliding-window counter keyed by client address.
+
+    One uvicorn worker serves the Space, so process-local state is the whole
+    truth; a multi-worker deployment would count per worker, which only
+    loosens the cap.
+    """
+
+    def __init__(self) -> None:
+        self._hits: dict[str, deque[float]] = {}
+        self._lock = Lock()
+
+    def retry_after(
+        self, key: str, max_requests: int, window_seconds: float
+    ) -> float | None:
+        """Record a hit and return None, or, when the key is over budget, the
+        seconds until the next slot frees up (the hit is then not recorded)."""
+        now = time.monotonic()
+        cutoff = now - window_seconds
+        with self._lock:
+            hits = self._hits.setdefault(key, deque())
+            while hits and hits[0] <= cutoff:
+                hits.popleft()
+            if len(hits) >= max_requests:
+                return hits[0] + window_seconds - now
+            hits.append(now)
+            if len(self._hits) > 4096:
+                # Bound memory against address churn: drop keys whose whole
+                # window has already expired.
+                stale = [
+                    other
+                    for other, times in self._hits.items()
+                    if other != key and (not times or times[-1] <= cutoff)
+                ]
+                for other in stale:
+                    del self._hits[other]
+            return None
+
+
+_RATE_LIMITER = SlidingWindowRateLimiter()
+
+
+def rate_limit_config() -> tuple[int, float]:
+    """Per-IP request budget, read from the environment per request so ops and
+    tests can adjust it without a restart. Zero or negative disables."""
+    try:
+        max_requests = int(
+            os.getenv(RATE_LIMIT_MAX_REQUESTS_ENV) or DEFAULT_RATE_LIMIT_MAX_REQUESTS
+        )
+    except ValueError:
+        max_requests = DEFAULT_RATE_LIMIT_MAX_REQUESTS
+    try:
+        window_seconds = float(
+            os.getenv(RATE_LIMIT_WINDOW_SECONDS_ENV)
+            or DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+        )
+    except ValueError:
+        window_seconds = DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+    return max_requests, window_seconds
+
+
+def proxied_client_address(request: Request) -> str | None:
+    """The client IP as reported by the reverse proxy, or None without one.
+
+    On HF Spaces every request reaches uvicorn through the Space router, which
+    appends the real client to X-Forwarded-For -- so the LAST entry is
+    proxy-written and spoof-resistant (a client-supplied header only prepends).
+    No header means no proxy (local dev, tests): rate limiting is skipped
+    there rather than keyed on the raw socket peer, which would throttle the
+    developer's own loopback.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    last = forwarded.rsplit(",", 1)[-1].strip()
+    return last or None
 
 
 class ApiChatTurn(BaseModel):
@@ -268,6 +381,13 @@ def build_chat_request(payload: ApiChatRequest) -> ChatRequest:
             status_code=422,
             detail=f"query exceeds {MAX_QUERY_CHARS} characters",
         )
+
+    abuse_marker = find_abuse_marker(query, history)
+    if abuse_marker is not None:
+        # Generic detail on purpose: naming the detection would hand the
+        # operator of the scripted client the exact string to remove.
+        logger.warning("Rejected chat request matching abuse pattern %s", abuse_marker)
+        raise HTTPException(status_code=403, detail="Request rejected")
 
     allowed_source_keys = set(AVAILABLE_SOURCES)
     if payload.sourceKeys is not None and not payload.sourceKeys:
@@ -876,7 +996,19 @@ def _release_thread_slot(thread_id: str, slot: _ThreadRunSlot) -> None:
 
 
 @app.post("/api/chat")
-async def chat(payload: ApiChatRequest) -> StreamingResponse:
+async def chat(payload: ApiChatRequest, request: Request) -> StreamingResponse:
+    max_requests, window_seconds = rate_limit_config()
+    client_address = proxied_client_address(request)
+    if client_address is not None and max_requests > 0 and window_seconds > 0:
+        retry_after = _RATE_LIMITER.retry_after(
+            client_address, max_requests, window_seconds
+        )
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many requests from this address; retry shortly.",
+                headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+            )
     chat_request = build_chat_request(payload)
 
     async def event_stream():

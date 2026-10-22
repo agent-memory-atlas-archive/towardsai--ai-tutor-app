@@ -860,6 +860,27 @@ class ChatServiceTestCase(unittest.TestCase):
         select.assert_not_called()
         self.assertFalse(retrieve_tutor_context.args_schema["additionalProperties"])
 
+    def test_retrieve_tutor_context_missing_query_returns_soft_error(self) -> None:
+        """The dict args_schema skips Pydantic validation, so a call that
+        omits `query` reaches Python's call binding directly; it must come
+        back as a corrective tool message, not a TypeError that kills the
+        turn. Seen in prod Sep-Oct 2026: Gemini Flash Lite batching
+        `{"queries": [...]}` into a single call."""
+        with patch("app.chat_service.select_retriever") as select:
+            result = retrieve_tutor_context.func(
+                queries=["RAG basics", "fine-tuning basics"],
+            )
+        self.assertIn("exactly one `query` string", result)
+        self.assertIn("queries", result)
+        select.assert_not_called()
+
+    def test_kb_command_missing_command_returns_soft_error(self) -> None:
+        with patch("app.chat_service.execute_kb_command") as execute:
+            result = run_kb_command.func(commands=["ls wiki"])
+        self.assertIn("exactly one `command` string", result)
+        self.assertIn("commands", result)
+        execute.assert_not_called()
+
     def test_resolve_answer_citations_uses_current_turn_evidence(self) -> None:
         retrieval = SourceMatch(
             doc_id="peft:lora",
